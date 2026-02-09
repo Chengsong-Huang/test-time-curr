@@ -1,0 +1,5 @@
+{"model": "Qwen/Qwen3-4B-Base", "dataset": "aime2024", "num_variants": 2, "accuracy": 0.10208333333333333}
+{"model": "Qwen/Qwen3-4B-Base", "dataset": "aime2024", "num_variants": 2, "accuracy": 0.08333333333333333}
+{"model": "Qwen/Qwen3-4B-Base", "dataset": "aime2024", "num_variants": 1, "accuracy": 0.10416666666666667}
+{"model": "Qwen/Qwen3-4B-Base", "dataset": "aime2025", "num_variants": 1, "accuracy": 0.07708333333333334}
+{"model": "Qwen/Qwen3-8B-Base", "dataset": "aime2025", "num_variants": 1, "accuracy": 0.08541666666666667}
