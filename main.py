@@ -49,15 +49,9 @@ GEN_SYSTEM_PROMPT_OVERLOAD = """You are an expert mathematics problem setter. Yo
 - Variant {num_variants}: Should be an extreme challenge, significantly more complex than both the original reference question and Variant 1.
 """ + OUTPUT_FORMAT_INSTRUCTIONS
 
-# Prompt for Phase 2A: Solving the isolated experiences independently
-VARIANT_SOLVE_PROMPT = """You are a mathematical reasoning engine. 
-Solve the following question step-by-step.
-
-CRITICAL: End your response with: Final Answer: \\boxed{{result}}"""
-
-# Prompt for Phase 2B: Solving the final target using the buffer
-TARGET_SOLVE_PROMPT = """You are a mathematical reasoning engine. 
-Solve the following target question step-by-step. You are provided with a cognitive buffer of analogous experiences (related problems and their full reasoning). Use their logical patterns to solve the current NEW target question.
+# 求解 Prompt 保持一致 (Step 2 共用)
+SOLVE_SYSTEM_PROMPT = """You are a mathematical reasoning engine. 
+Solve the following question step-by-step. You will be provided with previous related problems and their full reasoning as context. Use their logic to solve the current NEW question.
 
 CRITICAL: End your response with: Final Answer: \\boxed{{result}}"""
 
@@ -188,66 +182,52 @@ class QwenChainGenerator:
         # ==========================================
         # Step 2: 链式分层并行求解 (各策略共用)
         # ==========================================
-        # Phase 2A: Solve all generated variants INDEPENDENTLY P(a_i | q_i)
-        variant_prompts, variant_mapping = [], []
-        for t_idx, task in enumerate(tasks):
-            for v_idx, variant in enumerate(task["variants"]):
-                # No history context here. They solve their own problems independently.
-                user_msg = f"### CURRENT NEW QUESTION:\n{variant['question']}"
+        for step in range(num_variants + 1):
+            is_final = (step == num_variants)
+            current_batch_prompts, mapping = [], []
+
+            for t_idx, task in enumerate(tasks):
+                if not is_final:
+                    if step < len(task["variants"]):
+                        target_q = task["variants"][step]["question"]
+                        v_idx = step
+                    else: continue # 容错处理：如果提取的变体不够，直接跳过当前层的这道题
+                else:
+                    target_q = task["original_q"]
+                    v_idx = None
+
+                user_msg = f"### PREVIOUS SOLVED VARIANTS (CONTEXT):\n{task['full_history_context'] if task['full_history_context'] else 'None.'}\n\n### CURRENT NEW QUESTION:\n{target_q}"
+                
                 solve_msgs = [
-                    {"role": "system", "content": VARIANT_SOLVE_PROMPT},
+                    {"role": "system", "content": SOLVE_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg}
                 ]
-                variant_prompts.append(self.tokenizer.apply_chat_template(solve_msgs, tokenize=False, add_generation_prompt=True))
-                variant_mapping.append((t_idx, v_idx))
+                current_batch_prompts.append(self.tokenizer.apply_chat_template(solve_msgs, tokenize=False, add_generation_prompt=True))
+                mapping.append((t_idx, v_idx))
 
-        if variant_prompts:
-            print(f">>> Step 2A: Solving all {len(variant_prompts)} variants independently...")
-            variant_responses = self.llm.generate(variant_prompts, self.solve_params)
-            
-            for i, res in enumerate(variant_responses):
-                t_idx, v_idx = variant_mapping[i]
+            if not current_batch_prompts: continue
+
+            print(f">>> Step 2.{step}: Solving level {step} (Batch size: {len(current_batch_prompts)})")
+            responses = self.llm.generate(current_batch_prompts, self.solve_params)
+
+            for i, res in enumerate(responses):
+                t_idx, v_idx = mapping[i]
                 cot = res.outputs[0].text.strip()
                 ans = self._extract_answer(cot)
                 solve_tokens = len(res.outputs[0].token_ids)
                 
                 tasks[t_idx]["total_generated_tokens"] += solve_tokens
                 tasks[t_idx]["step_tokens"]["solving_steps"].append(solve_tokens)
-                
-                tasks[t_idx]["variants"][v_idx]["full_cot"] = cot
-                tasks[t_idx]["variants"][v_idx]["extracted_answer"] = ans
-                
-                # Build the dynamic cognitive buffer for the final step
-                q_text = tasks[t_idx]["variants"][v_idx]["question"]
-                tasks[t_idx]["full_history_context"] += f"\n[Experience {v_idx+1}]\nQuestion: {q_text}\nReasoning: {cot}\nAnswer: \\boxed{{{ans}}}\n"
 
-        # Phase 2B: Final Inference P(a* | q*, E)
-        final_prompts, final_mapping = [], []
-        for t_idx, task in enumerate(tasks):
-            user_msg = f"### PREVIOUS ANALOGOUS EXPERIENCES (CONTEXT):\n{task['full_history_context'] if task['full_history_context'] else 'None.'}\n\n### CURRENT TARGET QUESTION:\n{task['original_q']}"
-            
-            solve_msgs = [
-                {"role": "system", "content": TARGET_SOLVE_PROMPT},
-                {"role": "user", "content": user_msg}
-            ]
-            final_prompts.append(self.tokenizer.apply_chat_template(solve_msgs, tokenize=False, add_generation_prompt=True))
-            final_mapping.append(t_idx)
-
-        if final_prompts:
-            print(f">>> Step 2B: Final inference on target questions (Batch size: {len(final_prompts)})")
-            final_responses = self.llm.generate(final_prompts, self.solve_params)
-
-            for i, res in enumerate(final_responses):
-                t_idx = final_mapping[i]
-                cot = res.outputs[0].text.strip()
-                ans = self._extract_answer(cot)
-                solve_tokens = len(res.outputs[0].token_ids)
-                
-                tasks[t_idx]["total_generated_tokens"] += solve_tokens
-                tasks[t_idx]["step_tokens"]["solving_steps"].append(solve_tokens)
-                
-                tasks[t_idx]["final_solution"] = cot
-                tasks[t_idx]["final_extracted_answer"] = ans
+                if v_idx is not None:
+                    tasks[t_idx]["variants"][v_idx]["full_cot"] = cot
+                    tasks[t_idx]["variants"][v_idx]["extracted_answer"] = ans
+                    q_text = tasks[t_idx]["variants"][v_idx]["question"]
+                    # 将这一步的题目、推理和答案加入上下文，供下一步使用
+                    tasks[t_idx]["full_history_context"] += f"\n[Variant {v_idx+1}]\nQuestion: {q_text}\nReasoning: {cot}\nAnswer: \\boxed{{{ans}}}\n"
+                else:
+                    tasks[t_idx]["final_solution"] = cot
+                    tasks[t_idx]["final_extracted_answer"] = ans
 
         return tasks
 
